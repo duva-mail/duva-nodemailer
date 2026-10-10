@@ -1,0 +1,75 @@
+# Publication de `nodemailer-duva` sur npm (avec provenance).
+#
+# Déclencheur : l'étiquette Git `vX.Y.Z` (la version de package.json DOIT être celle de l'étiquette), ou « Run
+# workflow » à la main, qui ne publie JAMAIS (contrôles seulement) sauf si on décoche `dry_run` sur une étiquette.
+#
+# Authentification : « trusted publishing » de npm (OIDC, aucun jeton stocké). À déclarer UNE fois sur npmjs.com :
+# paquet nodemailer-duva > Settings > Trusted Publisher > GitHub Actions : organisation `duva-mail`, dépôt
+# `duva-nodemailer`, workflow `release.yml`, environnement `publication`. Un paquet qui n'existe pas encore doit
+# d'abord être publié avec un jeton (secret `NPM_TOKEN`, à retirer ensuite).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Construire et contrôler seulement (ne rien publier)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: La version de package.json est celle de l'étiquette
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "package.json=${version}, étiquette=${GITHUB_REF_NAME}" >&2; exit 1; }
+      - name: Le CHANGELOG annonce la version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: grep -q "^## ${GITHUB_REF_NAME#v}\$" CHANGELOG.md || { echo "CHANGELOG sans section ${GITHUB_REF_NAME#v}" >&2; exit 1; }
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+
+  publish:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.dry_run == false)
+    runs-on: ubuntu-latest
+    environment: publication
+    permissions:
+      contents: read
+      id-token: write # provenance + trusted publishing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: npm récent (le trusted publishing exige npm >= 11.5.1)
+        run: npm install -g npm@latest
+      - name: "Jeton npm (seulement pour le TOUT PREMIER envoi, car le trusted publishing exige que le paquet existe)"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"; fi
+      - run: npm publish --provenance --access public
